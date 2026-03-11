@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    /* S4Carlisle Brand Colors */
+    --color-s4c-blue: #1B4F8A;
+    --color-s4c-red: #CC2229;
+    --color-s4c-orange: #E88B2D;
+
+    /* Primary (S4C Blue) */
+    --color-primary-50: #EEF3F9;
+    --color-primary-100: #D1DFED;
+    --color-primary-200: #A3BFDB;
+    --color-primary-300: #759FC9;
+    --color-primary-400: #477FB7;
+    --color-primary: #1B4F8A;
+    --color-primary-dark: #15406F;
+    --color-primary-700: #103256;
+    --color-primary-800: #0B243D;
+    --color-primary-900: #071828;
+
+    /* Accent Orange (S4C Orange) */
+    --color-accent: #E88B2D;
+    --color-accent-light: #F0A55A;
+    --color-accent-dark: #D07A20;
+
+    /* Sidebar */
+    --color-sidebar-bg: #0F2E54;
+    --color-sidebar-hover: #1B4F8A;
+    --color-sidebar-active: #E88B2D;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* S4Carlisle Sidebar Navigation */
+.s4c-nav-item {
+  color: rgba(191, 210, 234, 0.85);
+}
+.s4c-nav-item:hover {
+  background-color: var(--color-sidebar-hover);
+  color: #ffffff;
+}
+.s4c-nav-active {
+  background-color: var(--color-sidebar-active);
+  color: #ffffff;
+  font-weight: 600;
+}
+.s4c-sidebar-btn:hover {
+  background-color: var(--color-sidebar-hover);
+}
+
+/* S4Carlisle Login Page */
+.s4c-login-bg {
+  background: linear-gradient(135deg, #0B243D 0%, #1B4F8A 50%, #477FB7 100%);
+}
+.s4c-input:focus {
+  border-color: var(--color-s4c-blue);
+  box-shadow: 0 0 0 1px var(--color-s4c-blue);
+  outline: none;
+}
+.s4c-btn-primary {
+  background-color: var(--color-s4c-blue);
+  transition: background-color 150ms;
+}
+.s4c-btn-primary:hover:not(:disabled) {
+  background-color: var(--color-primary-dark);
+}
+.s4c-btn-primary:focus-visible {
+  outline: 2px solid var(--color-s4c-blue);
+  outline-offset: 2px;
+}
