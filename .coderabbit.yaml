@@ -1,0 +1,5 @@
+# CodeRabbit runs locally via CLI in the pre-push hook (scripts/pre-push-check.sh).
+# Disable GitHub App auto-reviews to avoid duplicate reviews.
+reviews:
+  auto_review:
+    enabled: false

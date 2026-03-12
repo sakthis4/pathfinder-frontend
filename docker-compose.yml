@@ -1,0 +1,31 @@
+# =============================================================================
+# Pathfinder Frontend — Docker Compose (Staging)
+# =============================================================================
+# Runs alongside the backend docker-compose (same Docker network).
+# Connects to pathfinder-app container for API proxy.
+#
+# Usage on staging server:
+#   docker-compose up -d --build
+# =============================================================================
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pathfinder-frontend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    networks:
+      - pathfinder-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  pathfinder-net:
+    external: true
