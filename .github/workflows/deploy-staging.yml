@@ -1,0 +1,273 @@
+# =============================================================================
+# Pathfinder Frontend — Staging Deployment (Linux Server)
+# =============================================================================
+# Triggers on merge to main branch (after CI passes).
+# Deploys to the on-premise Linux staging server via SSH.
+#
+# Flow:
+#   1. SSH into Linux server
+#   2. Pull latest frontend code
+#   3. Build Docker image (nginx + React SPA)
+#   4. Run container on port 5000
+#   5. Run smoke tests
+#   6. Post deployment status to GitHub
+#
+# The frontend connects to the backend via Docker network (pathfinder-net).
+# Backend must be running first (pathfinder-app container on port 3002).
+#
+# Required GitHub Secrets:
+#   - STAGING_SSH_KEY     — Private SSH key for staging server
+#   - STAGING_HOST        — Staging server IP/hostname
+#   - STAGING_USER        — SSH username on staging server
+#   - STAGING_DEPLOY_PATH — Absolute path to frontend project on staging server
+# =============================================================================
+
+name: Deploy Frontend to Staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-frontend-staging
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  deploy:
+    name: Deploy Frontend to Linux Staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    permissions:
+      contents: read
+      statuses: write
+      deployments: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Prepare SSH
+      # -----------------------------------------------------------------------
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_key
+          chmod 600 ~/.ssh/staging_key
+          if ! ssh-keyscan -H ${{ secrets.STAGING_HOST }} >> ~/.ssh/known_hosts 2>/dev/null; then
+            echo "::warning::Could not fetch host key for staging server"
+          fi
+
+      - name: Get deployment info
+        id: deploy_info
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$(date +%Y%m%d_%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Verify server is reachable
+      # -----------------------------------------------------------------------
+      - name: Verify staging server is reachable
+        id: ssh_check
+        run: |
+          echo "Checking connectivity to staging server..."
+          if ! ssh -i ~/.ssh/staging_key \
+               -o StrictHostKeyChecking=no \
+               -o ConnectTimeout=15 \
+               -o BatchMode=yes \
+               ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} "echo ok" 2>/dev/null; then
+            echo "::error::Staging server is unreachable."
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "reachable=true" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Deploy: Pull, Build, Start
+      # -----------------------------------------------------------------------
+      - name: Deploy frontend to staging server
+        if: steps.ssh_check.outputs.reachable == 'true'
+        id: deploy
+        run: |
+          ssh -i ~/.ssh/staging_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} \
+              "DEPLOY_PATH='${{ secrets.STAGING_DEPLOY_PATH }}' bash -s" << 'DEPLOY_SCRIPT'
+          set -euo pipefail
+
+          echo "============================================"
+          echo "  Pathfinder Frontend Staging Deployment"
+          echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "============================================"
+
+          # ---- Step 1: Pull latest frontend code ----
+          echo "[1/4] Pulling latest frontend code..."
+          if [ -d "$DEPLOY_PATH" ]; then
+            cd "$DEPLOY_PATH"
+            git remote set-url origin git@github.com:sakthis4/pathfinder-frontend.git 2>/dev/null || true
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+          else
+            git clone git@github.com:sakthis4/pathfinder-frontend.git "$DEPLOY_PATH"
+            cd "$DEPLOY_PATH"
+          fi
+
+          # ---- Step 2: Verify backend network exists ----
+          echo "[2/4] Checking backend network..."
+          if ! docker network inspect pathfinder-net >/dev/null 2>&1; then
+            echo "ERROR: pathfinder-net network not found. Backend must be running first."
+            echo "Run 'docker-compose up -d' in the backend repo first."
+            exit 1
+          fi
+          echo "  pathfinder-net network exists"
+
+          # ---- Step 3: Build and start frontend container ----
+          echo "[3/4] Building and starting frontend..."
+          docker-compose down --remove-orphans 2>/dev/null || true
+          docker-compose up -d --build
+
+          # ---- Step 4: Wait for frontend to be healthy ----
+          echo "[4/4] Waiting for frontend to be healthy..."
+          MAX_WAIT=60
+          ELAPSED=0
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:5000/" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "  Frontend is healthy after ${ELAPSED}s"
+              break
+            fi
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+            echo "  Waiting... ${ELAPSED}s / ${MAX_WAIT}s (HTTP $HTTP_CODE)"
+          done
+
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "ERROR: Frontend did not start within ${MAX_WAIT}s"
+            docker-compose ps
+            docker-compose logs --tail=30
+            exit 1
+          fi
+
+          echo ""
+          echo "Frontend deployment complete."
+          docker-compose ps
+          echo ""
+          DEPLOY_SCRIPT
+
+      # -----------------------------------------------------------------------
+      # Smoke Tests
+      # -----------------------------------------------------------------------
+      - name: Run smoke tests (via SSH on staging server)
+        id: smoke_tests
+        run: |
+          echo "Running frontend smoke tests on staging server via SSH..."
+
+          ssh -i ~/.ssh/staging_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} << 'SMOKE_SCRIPT'
+          set -euo pipefail
+
+          FAILED=0
+
+          echo ""
+          echo "============================================"
+          echo "  Frontend Smoke Tests"
+          echo "============================================"
+
+          # Test 1: Frontend serves index.html
+          echo "Test 1: Frontend serving..."
+          FRONTEND_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:5000/" 2>/dev/null || echo "000")
+          if [ "$FRONTEND_CODE" = "200" ]; then
+            echo "  PASS: Frontend serving (HTTP $FRONTEND_CODE)"
+          else
+            echo "  FAIL: Frontend returned $FRONTEND_CODE"
+            FAILED=1
+          fi
+
+          # Test 2: Nginx proxies /health to backend
+          echo "Test 2: API proxy (/health)..."
+          PROXY_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:5000/health" 2>/dev/null || echo "000")
+          if [ "$PROXY_CODE" = "200" ]; then
+            echo "  PASS: /health proxied to backend (HTTP $PROXY_CODE)"
+          else
+            echo "  FAIL: /health proxy returned $PROXY_CODE"
+            FAILED=1
+          fi
+
+          # Test 3: Nginx proxies /api to backend
+          echo "Test 3: API proxy (/api/v1/auth/me)..."
+          API_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:5000/api/v1/auth/me" 2>/dev/null || echo "000")
+          if [ "$API_CODE" = "401" ] || [ "$API_CODE" = "403" ] || [ "$API_CODE" = "200" ]; then
+            echo "  PASS: /api proxied to backend (HTTP $API_CODE)"
+          else
+            echo "  FAIL: /api proxy returned $API_CODE"
+            FAILED=1
+          fi
+
+          # Test 4: SPA routing (unknown path should return index.html, not 404)
+          echo "Test 4: SPA routing..."
+          SPA_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:5000/dashboard" 2>/dev/null || echo "000")
+          if [ "$SPA_CODE" = "200" ]; then
+            echo "  PASS: SPA routing works (HTTP $SPA_CODE)"
+          else
+            echo "  FAIL: SPA routing returned $SPA_CODE"
+            FAILED=1
+          fi
+
+          echo ""
+          if [ "$FAILED" -eq 1 ]; then
+            echo "SMOKE TESTS FAILED"
+            exit 1
+          fi
+
+          echo "All frontend smoke tests passed."
+          SMOKE_SCRIPT
+
+      # -----------------------------------------------------------------------
+      # Post deployment status
+      # -----------------------------------------------------------------------
+      - name: Post deployment status (success)
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'success',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: 'Frontend staging deployment successful',
+              context: 'deploy/staging',
+            });
+
+      - name: Post deployment status (failure)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'failure',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: 'Frontend staging deployment failed',
+              context: 'deploy/staging',
+            });
+
+      # -----------------------------------------------------------------------
+      # Cleanup
+      # -----------------------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ~/.ssh/staging_key
