@@ -12,6 +12,7 @@ export function Header() {
         <button
           onClick={toggleCollapsed}
           className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 lg:hidden"
+          aria-label="Toggle sidebar"
         >
           <Menu size={20} />
         </button>
@@ -21,7 +22,7 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-3">
-        <button className="relative rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700">
+        <button className="relative rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700" aria-label="Notifications">
           <Bell size={18} />
         </button>
 
@@ -39,6 +40,7 @@ export function Header() {
             onClick={logout}
             className="rounded-md p-1.5 text-gray-400 hover:bg-gray-100 hover:text-red-500"
             title="Logout"
+            aria-label="Logout"
           >
             <LogOut size={16} />
           </button>
