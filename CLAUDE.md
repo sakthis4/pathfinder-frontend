@@ -4,7 +4,7 @@
 
 Pathfinder Web is the React single-page application frontend for the Pathfinder ERP system (S4Carlisle publishing/typesetting). It communicates exclusively with the Pathfinder backend API — no direct database access, no AI services.
 
-**Backend repo:** [github.com/sakthis4/pathfinder-modern](https://github.com/sakthis4/pathfinder-modern) (Express API)
+**Backend repo:** [github.com/sakthis4/pathfinder-backend](https://github.com/sakthis4/pathfinder-backend) (Express API)
 
 ---
 
@@ -20,7 +20,7 @@ Pathfinder Web is the React single-page application frontend for the Pathfinder 
 | TanStack Query | 5 | Server state / data fetching |
 | React Router | 7 | Routing |
 | Axios | 1.x | HTTP client |
-| Zod | — | Runtime input/form validation |
+| Zod | — | Runtime input/form validation (install when needed) |
 | Lucide React | — | Icons |
 
 ---
@@ -50,8 +50,8 @@ npm run preview      # Preview production build locally
 ### Starting Development
 
 ```bash
-# Terminal 1 — Backend (from pathfinder-modern repo)
-cd pathfinder-modern && pnpm dev
+# Terminal 1 — Backend (from pathfinder-backend repo)
+cd pathfinder && npm run dev
 
 # Terminal 2 — Frontend (this repo)
 npm run dev
@@ -89,6 +89,10 @@ src/
 ### No AI
 - **NO AI services in production** — all logic is deterministic and rule-based
 - No Gemini, no Claude API, no LLM calls from the frontend
+
+### Git Push Policy
+- **NEVER use `git push --no-verify`** — pre-push hooks MUST run on every push, no exceptions
+- If the hook fails, fix the issue and push again — never bypass
 
 ### Code Quality (enforce at write-time)
 - **Zero lint errors AND zero warnings** — both enforced before every push
@@ -133,17 +137,44 @@ src/
 
 ---
 
-## Pre-Push Checklist (MANDATORY)
+## Development Workflow
 
-**NEVER push code that fails these checks:**
+### For EVERY Code Update (Phase A — run after every change)
 
 ```bash
-npm run lint          # Zero errors + zero warnings
-npm run type-check    # TypeScript strict validation
-npm run build         # Production build succeeds
+/simplify                    # Code reuse, quality, efficiency (Claude Code skill)
+npm run lint                 # ESLint — zero errors + zero warnings
+npm run type-check           # TypeScript strict validation
+npm test                     # All tests (when test script exists)
 ```
 
-All three must pass before every push. The CI pipeline enforces this on every PR.
+**EVERY UPDATE** means every time you change code — not just at the end of a feature. Catch issues early.
+
+### Before Push (Phase C — MANDATORY)
+
+```bash
+# Step 1: /review-fix (CodeRabbit + Claude review + security review — iterates until clean)
+/review-fix
+
+# Step 2: Pre-push checks (automated on git push — 6 checks)
+./scripts/pre-push-check.sh
+# Runs: lint → type-check → tests → build → security audit → CodeRabbit CLI
+# Push is BLOCKED if any check fails.
+
+# Step 3: Push (only after steps 1 and 2 pass)
+git push
+```
+
+### Pre-Push Checks (6 gates)
+
+| # | Check | Blocks Push? |
+|---|-------|-------------|
+| 1 | ESLint (zero errors + zero warnings) | Yes |
+| 2 | TypeScript type-check | Yes |
+| 3 | Tests (if test script exists) | Yes |
+| 4 | Build (production build succeeds) | Yes |
+| 5 | Security audit (`npm audit --audit-level=critical`) | Yes (critical only) |
+| 6 | CodeRabbit CLI review | Yes (on critical/bug/security findings) |
 
 ---
 
@@ -196,3 +227,29 @@ VITE_BACKEND_URL=http://localhost:3002     # Backend URL (same)
 ```
 
 For production, these are set at build time or via Docker/nginx config.
+
+---
+
+## CI/CD
+
+### GitHub Secrets (required for staging deploy)
+
+| Secret | Value | Purpose |
+|--------|-------|---------|
+| `STAGING_SSH_KEY` | SSH private key | Access to staging server |
+| `STAGING_HOST` | `180.151.63.166` | Staging server IP |
+| `STAGING_USER` | `itsupport` | SSH username |
+| `STAGING_DEPLOY_PATH` | `/home/itsupport/pathfinder-frontend` | Frontend path on server |
+
+### Pipeline
+
+| Stage | Trigger | What Runs | Blocks On |
+|-------|---------|-----------|-----------|
+| **`/simplify`** | Every code update | Code reuse + quality + efficiency review → auto-fix | Findings remain → must fix |
+| **`/review-fix`** | Before push | CodeRabbit CLI + Claude review + security review → iterate until clean | Findings remain → must fix |
+| **Git pre-push hook** | `git push` | lint, type-check, tests, build, security audit, CodeRabbit CLI (6 checks) | Any failure → push blocked |
+| **GitHub Actions CI** | PR to main | lint, type-check, build | Any failure → merge blocked |
+| **Deploy Staging** | Merge to main | SSH → Docker build → 4 smoke tests → fail = deploy blocked | Smoke test failure |
+
+- **CodeRabbit**: Runs locally via CLI in pre-push hook (not GitHub App)
+- **Claude review + security**: Run via `/review-fix` skill before push (cannot be automated in bash)
