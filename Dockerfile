@@ -22,5 +22,7 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 5000
 
-# Healthcheck defined in docker-compose.yml (overrides Dockerfile HEALTHCHECK)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO /dev/null http://localhost:5000/ || exit 1
+
 CMD ["nginx", "-g", "daemon off;"]

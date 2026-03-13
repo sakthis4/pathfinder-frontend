@@ -101,13 +101,19 @@ jobs:
               "DEPLOY_PATH='${{ secrets.STAGING_DEPLOY_PATH }}' bash -s" << 'DEPLOY_SCRIPT'
           set -euo pipefail
 
+          # Validate DEPLOY_PATH contains only safe characters
+          if [[ ! "$DEPLOY_PATH" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+            echo "::error::STAGING_DEPLOY_PATH contains unsafe characters"
+            exit 1
+          fi
+
           echo "============================================"
           echo "  Pathfinder Frontend Staging Deployment"
           echo "  $(date '+%Y-%m-%d %H:%M:%S')"
           echo "============================================"
 
           # ---- Step 1: Pull latest frontend code ----
-          echo "[1/4] Pulling latest frontend code..."
+          echo "[1/5] Pulling latest frontend code..."
           if [ -d "$DEPLOY_PATH" ]; then
             cd "$DEPLOY_PATH"
             git remote set-url origin git@github.com:sakthis4/pathfinder-frontend.git 2>/dev/null || true
@@ -120,7 +126,7 @@ jobs:
           fi
 
           # ---- Step 2: Verify backend network exists ----
-          echo "[2/4] Checking backend network..."
+          echo "[2/5] Checking backend network..."
           if ! docker network inspect pathfinder-net >/dev/null 2>&1; then
             echo "ERROR: pathfinder-net network not found. Backend must be running first."
             echo "Run 'docker-compose up -d' in the backend repo first."
@@ -128,13 +134,18 @@ jobs:
           fi
           echo "  pathfinder-net network exists"
 
-          # ---- Step 3: Build and start frontend container ----
-          echo "[3/4] Building and starting frontend..."
+          # ---- Step 3: Save current image for rollback ----
+          echo "[3/5] Saving current image for rollback..."
+          CURRENT_IMAGE=$(docker inspect --format='{{.Image}}' pathfinder-frontend 2>/dev/null || true)
+          [ -n "$CURRENT_IMAGE" ] && docker tag "$CURRENT_IMAGE" pathfinder-frontend:previous 2>/dev/null || true
+
+          # ---- Step 4: Build and start frontend container ----
+          echo "[4/5] Building and starting frontend..."
           docker-compose down --remove-orphans 2>/dev/null || true
           docker-compose up -d --build
 
-          # ---- Step 4: Wait for frontend to be healthy ----
-          echo "[4/4] Waiting for frontend to be healthy..."
+          # ---- Step 5: Wait for frontend to be healthy ----
+          echo "[5/5] Waiting for frontend to be healthy..."
           MAX_WAIT=60
           ELAPSED=0
           while [ $ELAPSED -lt $MAX_WAIT ]; do
@@ -230,6 +241,35 @@ jobs:
 
           echo "All frontend smoke tests passed."
           SMOKE_SCRIPT
+
+      # -----------------------------------------------------------------------
+      # Rollback on failure
+      # -----------------------------------------------------------------------
+      - name: Rollback on failure
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          ssh -i ~/.ssh/staging_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} \
+              "DEPLOY_PATH='${{ secrets.STAGING_DEPLOY_PATH }}' bash -s" << 'ROLLBACK_SCRIPT'
+          set -euo pipefail
+
+          # Validate DEPLOY_PATH contains only safe characters
+          if [[ ! "$DEPLOY_PATH" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+            echo "::error::STAGING_DEPLOY_PATH contains unsafe characters"
+            exit 1
+          fi
+
+          cd "$DEPLOY_PATH"
+          echo "Rolling back frontend deployment..."
+          # Restore previous image
+          docker tag pathfinder-frontend:previous pathfinder-frontend:latest 2>/dev/null || true
+          docker-compose down --remove-orphans 2>/dev/null || true
+          docker-compose up -d
+          sleep 10
+          curl -sf http://localhost:5000/ && echo "Rollback successful" || echo "WARNING: Rollback health check failed"
+          ROLLBACK_SCRIPT
 
       # -----------------------------------------------------------------------
       # Post deployment status

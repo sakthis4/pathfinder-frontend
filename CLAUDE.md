@@ -90,6 +90,10 @@ src/
 - **NO AI services in production** — all logic is deterministic and rule-based
 - No Gemini, no Claude API, no LLM calls from the frontend
 
+### Git Push Policy
+- **NEVER use `git push --no-verify`** — pre-push hooks MUST run on every push, no exceptions
+- If the hook fails, fix the issue and push again — never bypass
+
 ### Code Quality (enforce at write-time)
 - **Zero lint errors AND zero warnings** — both enforced before every push
 - **NEVER use `any`** — use specific types or `unknown` with narrowing
@@ -233,7 +237,7 @@ For production, these are set at build time or via Docker/nginx config.
 | Secret | Value | Purpose |
 |--------|-------|---------|
 | `STAGING_SSH_KEY` | SSH private key | Access to staging server |
-| `STAGING_HOST` | `10.1.1.70` | Staging server IP |
+| `STAGING_HOST` | `180.151.63.166` | Staging server IP |
 | `STAGING_USER` | `itsupport` | SSH username |
 | `STAGING_DEPLOY_PATH` | `/home/itsupport/pathfinder-frontend` | Frontend path on server |
 

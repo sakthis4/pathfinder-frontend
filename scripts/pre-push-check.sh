@@ -39,6 +39,12 @@ if [ "${1:-}" = "--quick" ]; then
   echo "WARNING: Quick mode — skipping tests + CodeRabbit review. Use only for emergencies!"
 fi
 
+# ---- Temp files (cleaned up on exit) ----
+TMPFILE=$(mktemp /tmp/pathfinder-frontend-pre-push-XXXXXX.log)
+SEC_TMPFILE=$(mktemp /tmp/pathfinder-frontend-security-XXXXXX.json)
+CR_TMPFILE=$(mktemp /tmp/pathfinder-frontend-coderabbit-XXXXXX.log)
+trap 'rm -f "$TMPFILE" "$SEC_TMPFILE" "$CR_TMPFILE"' EXIT
+
 # ---- Colors for output ----
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -95,7 +101,7 @@ run_check() {
   local check_start=$(date +%s)
   local exit_code=0
 
-  "$@" > /tmp/pathfinder-frontend-pre-push-output.log 2>&1 || exit_code=$?
+  "$@" > $TMPFILE 2>&1 || exit_code=$?
 
   local check_end=$(date +%s)
   local duration=$((check_end - check_start))
@@ -104,7 +110,7 @@ run_check() {
 
   if [ "$exit_code" -ne 0 ]; then
     echo -e "  ${YELLOW}Output:${NC}"
-    tail -20 /tmp/pathfinder-frontend-pre-push-output.log | sed 's/^/    /'
+    tail -20 $TMPFILE | sed 's/^/    /'
     echo ""
   fi
 
@@ -191,7 +197,7 @@ run_check "Frontend Build" npm run build || HAS_FAILURES=1
 print_step "5/6" "Security Audit (npm audit)"
 SEC_START=$(date +%s)
 SEC_EXIT=0
-npm audit --json > /tmp/pathfinder-frontend-security-output.log 2>&1 || SEC_EXIT=$?
+npm audit --json > $SEC_TMPFILE 2>&1 || SEC_EXIT=$?
 SEC_END=$(date +%s)
 SEC_DURATION=$((SEC_END - SEC_START))
 
@@ -202,7 +208,7 @@ if [ "$SEC_EXIT" -eq 0 ]; then
   echo -e "  ${GREEN}PASS${NC} (${SEC_DURATION}s)"
 else
   # Parse JSON output for accurate critical vulnerability count
-  CRITICAL_COUNT=$(node -e "try{const d=require('/tmp/pathfinder-frontend-security-output.log');console.log((d.metadata&&d.metadata.vulnerabilities&&d.metadata.vulnerabilities.critical)||0)}catch(e){console.log(0)}" 2>/dev/null || echo "0")
+  CRITICAL_COUNT=$(node -e "try{const d=JSON.parse(require('fs').readFileSync('$SEC_TMPFILE','utf8'));console.log((d.metadata&&d.metadata.vulnerabilities&&d.metadata.vulnerabilities.critical)||0)}catch(e){console.log(0)}" 2>/dev/null || echo "0")
   TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
   if [ "$CRITICAL_COUNT" -gt 0 ]; then
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
@@ -216,8 +222,6 @@ else
     echo -e "  ${YELLOW}WARN${NC} — non-critical issues (advisory) (${SEC_DURATION}s)"
   fi
 fi
-rm -f /tmp/pathfinder-frontend-security-output.log
-
 # --------------------------------------------------------------------------
 # Check 6: CodeRabbit CLI Review (local, replaces GitHub CodeRabbit)
 # --------------------------------------------------------------------------
@@ -233,7 +237,7 @@ else
   CR_START=$(date +%s)
   CR_EXIT=0
 
-  coderabbit review --plain --base main > /tmp/pathfinder-frontend-coderabbit-output.log 2>&1 || CR_EXIT=$?
+  coderabbit review --plain --base main > $CR_TMPFILE 2>&1 || CR_EXIT=$?
 
   CR_END=$(date +%s)
   CR_DURATION=$((CR_END - CR_START))
@@ -244,7 +248,7 @@ else
   else
     # Count critical findings from CodeRabbit plain text output
     # CodeRabbit --plain outputs "Type: potential_issue", "Type: bug", "Type: security"
-    CRITICAL_COUNT=$(grep -icE '(Type:\s*(potential_issue|bug|security))' /tmp/pathfinder-frontend-coderabbit-output.log 2>/dev/null || true)
+    CRITICAL_COUNT=$(grep -icE '(Type:\s*(potential_issue|bug|security))' $CR_TMPFILE 2>/dev/null || true)
 
     if [ "$CRITICAL_COUNT" -gt 0 ]; then
       RESULTS+=("${YELLOW}WARN${NC}  CodeRabbit Review — $CRITICAL_COUNT issue(s) found (${CR_DURATION}s)")
@@ -256,16 +260,12 @@ else
     fi
   fi
 
-  rm -f /tmp/pathfinder-frontend-coderabbit-output.log
 fi
 
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 print_summary
-
-# Clean up temp file
-rm -f /tmp/pathfinder-frontend-pre-push-output.log
 
 # Exit with appropriate code
 if [ "$HAS_FAILURES" -ne 0 ]; then
