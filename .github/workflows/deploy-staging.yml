@@ -16,10 +16,11 @@
 # Backend must be running first (pathfinder-app container on port 3002).
 #
 # Required GitHub Secrets:
-#   - STAGING_SSH_KEY     — Private SSH key for staging server
-#   - STAGING_HOST        — Staging server IP/hostname
-#   - STAGING_USER        — SSH username on staging server
-#   - STAGING_DEPLOY_PATH — Absolute path to frontend project on staging server
+#   - STAGING_SSH_KEY          — Private SSH key for staging server
+#   - STAGING_HOST             — Public IP of staging server (e.g., 180.151.63.166)
+#   - STAGING_HOST_INTERNAL    — Internal/local IP of staging server (e.g., 10.1.1.70) [optional]
+#   - STAGING_USER             — SSH username on staging server
+#   - STAGING_DEPLOY_PATH      — Absolute path to frontend project on staging server
 # =============================================================================
 
 name: Deploy Frontend to Staging
@@ -59,8 +60,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_key
           chmod 600 ~/.ssh/staging_key
-          if ! ssh-keyscan -H ${{ secrets.STAGING_HOST }} >> ~/.ssh/known_hosts 2>/dev/null; then
-            echo "::warning::Could not fetch host key for staging server"
+          ssh-keyscan -H ${{ secrets.STAGING_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          if [ -n "${{ secrets.STAGING_HOST_INTERNAL }}" ]; then
+            ssh-keyscan -H ${{ secrets.STAGING_HOST_INTERNAL }} >> ~/.ssh/known_hosts 2>/dev/null || true
           fi
 
       - name: Get deployment info
@@ -75,17 +77,40 @@ jobs:
       - name: Verify staging server is reachable
         id: ssh_check
         run: |
-          echo "Checking connectivity to staging server..."
-          if ! ssh -i ~/.ssh/staging_key \
+          RESOLVED_HOST=""
+
+          # Try public IP first
+          echo "Trying public IP (${{ secrets.STAGING_HOST }})..."
+          if ssh -i ~/.ssh/staging_key \
                -o StrictHostKeyChecking=no \
                -o ConnectTimeout=15 \
                -o BatchMode=yes \
                ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} "echo ok" 2>/dev/null; then
-            echo "::error::Staging server is unreachable."
-            echo "reachable=false" >> "$GITHUB_OUTPUT"
-            exit 1
+            RESOLVED_HOST="${{ secrets.STAGING_HOST }}"
+            echo "Connected via public IP"
           fi
-          echo "reachable=true" >> "$GITHUB_OUTPUT"
+
+          # If public IP failed and internal IP is configured, try internal IP
+          if [ -z "$RESOLVED_HOST" ] && [ -n "${{ secrets.STAGING_HOST_INTERNAL }}" ]; then
+            echo "Public IP unreachable. Trying internal IP (${{ secrets.STAGING_HOST_INTERNAL }})..."
+            if ssh -i ~/.ssh/staging_key \
+                 -o StrictHostKeyChecking=no \
+                 -o ConnectTimeout=15 \
+                 -o BatchMode=yes \
+                 ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST_INTERNAL }} "echo ok" 2>/dev/null; then
+              RESOLVED_HOST="${{ secrets.STAGING_HOST_INTERNAL }}"
+              echo "Connected via internal IP"
+            fi
+          fi
+
+          if [ -z "$RESOLVED_HOST" ]; then
+            echo "::warning::Staging server unreachable via both public and internal IPs. Skipping deployment."
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "resolved_host=" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+            echo "resolved_host=$RESOLVED_HOST" >> "$GITHUB_OUTPUT"
+          fi
 
       # -----------------------------------------------------------------------
       # Deploy: Pull, Build, Start
@@ -97,7 +122,7 @@ jobs:
           ssh -i ~/.ssh/staging_key \
               -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
-              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} \
+              ${{ secrets.STAGING_USER }}@${{ steps.ssh_check.outputs.resolved_host }} \
               "DEPLOY_PATH='${{ secrets.STAGING_DEPLOY_PATH }}' bash -s" << 'DEPLOY_SCRIPT'
           set -euo pipefail
 
@@ -176,6 +201,7 @@ jobs:
       # Smoke Tests
       # -----------------------------------------------------------------------
       - name: Run smoke tests (via SSH on staging server)
+        if: steps.ssh_check.outputs.reachable == 'true'
         id: smoke_tests
         run: |
           echo "Running frontend smoke tests on staging server via SSH..."
@@ -183,7 +209,7 @@ jobs:
           ssh -i ~/.ssh/staging_key \
               -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
-              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} << 'SMOKE_SCRIPT'
+              ${{ secrets.STAGING_USER }}@${{ steps.ssh_check.outputs.resolved_host }} << 'SMOKE_SCRIPT'
           set -euo pipefail
 
           FAILED=0
@@ -251,7 +277,7 @@ jobs:
           ssh -i ~/.ssh/staging_key \
               -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
-              ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} \
+              ${{ secrets.STAGING_USER }}@${{ steps.ssh_check.outputs.resolved_host }} \
               "DEPLOY_PATH='${{ secrets.STAGING_DEPLOY_PATH }}' bash -s" << 'ROLLBACK_SCRIPT'
           set -euo pipefail
 
@@ -274,8 +300,23 @@ jobs:
       # -----------------------------------------------------------------------
       # Post deployment status
       # -----------------------------------------------------------------------
+      - name: Post deployment status (skipped — server unreachable)
+        if: steps.ssh_check.outputs.reachable == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'success',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: 'Frontend staging deploy skipped — server unreachable (internal network)',
+              context: 'deploy/staging',
+            });
+
       - name: Post deployment status (success)
-        if: success()
+        if: success() && steps.ssh_check.outputs.reachable == 'true'
         uses: actions/github-script@v7
         with:
           script: |
