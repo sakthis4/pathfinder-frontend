@@ -191,7 +191,7 @@ run_check "Frontend Build" npm run build || HAS_FAILURES=1
 print_step "5/6" "Security Audit (npm audit)"
 SEC_START=$(date +%s)
 SEC_EXIT=0
-npm audit --audit-level=critical > /tmp/pathfinder-frontend-security-output.log 2>&1 || SEC_EXIT=$?
+npm audit --json > /tmp/pathfinder-frontend-security-output.log 2>&1 || SEC_EXIT=$?
 SEC_END=$(date +%s)
 SEC_DURATION=$((SEC_END - SEC_START))
 
@@ -201,7 +201,8 @@ if [ "$SEC_EXIT" -eq 0 ]; then
   RESULTS+=("${GREEN}PASS${NC}  Security Audit (${SEC_DURATION}s)")
   echo -e "  ${GREEN}PASS${NC} (${SEC_DURATION}s)"
 else
-  CRITICAL_COUNT=$(grep -c 'critical' /tmp/pathfinder-frontend-security-output.log 2>/dev/null || echo "0")
+  # Parse JSON output for accurate critical vulnerability count
+  CRITICAL_COUNT=$(node -e "try{const d=require('/tmp/pathfinder-frontend-security-output.log');console.log((d.metadata&&d.metadata.vulnerabilities&&d.metadata.vulnerabilities.critical)||0)}catch(e){console.log(0)}" 2>/dev/null || echo "0")
   TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
   if [ "$CRITICAL_COUNT" -gt 0 ]; then
     FAILED_CHECKS=$((FAILED_CHECKS + 1))
