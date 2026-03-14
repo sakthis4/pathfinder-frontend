@@ -5,18 +5,15 @@
 # Runs all quality gates before allowing a push to remote.
 # This script is called by the git pre-push hook.
 #
-# Checks (in order):
-#   1. ESLint (code quality)
-#   2. TypeScript type checking
-#   3. Tests (if test script exists)
-#   4. Build verification
-#   5. Security audit (npm audit)
-#   6. CodeRabbit CLI review (local — replaces GitHub CodeRabbit)
+# Checks (run in parallel where possible):
+#   1. ESLint + TypeScript type check (parallel)
+#   2. Tests (if test script exists)
+#   3. Build verification
+#   4. Security audit (npm audit)
 #
-# IMPORTANT: Before running this script, you MUST have already run:
-#   - /simplify (code reuse, quality, efficiency) — during coding
-#   - /review-fix (CodeRabbit + Claude + security review loop) — before push
-#   These are Claude Code skills and cannot be automated in a bash hook.
+# Manual reviews (run these yourself BEFORE pushing):
+#   coderabbit review --plain --base main    — CodeRabbit CLI review
+#   /review-fix                               — CodeRabbit + Claude + security review loop
 #
 # Exit codes:
 #   0 — All checks passed, push is allowed
@@ -24,7 +21,7 @@
 #
 # Usage:
 #   ./scripts/pre-push-check.sh          # Run all checks
-#   ./scripts/pre-push-check.sh --quick  # Skip tests + CodeRabbit (for emergency fixes only)
+#   ./scripts/pre-push-check.sh --quick  # Skip tests (for emergency fixes only)
 # =============================================================================
 
 set -euo pipefail
@@ -36,14 +33,15 @@ QUICK_MODE=false
 
 if [ "${1:-}" = "--quick" ]; then
   QUICK_MODE=true
-  echo "WARNING: Quick mode — skipping tests + CodeRabbit review. Use only for emergencies!"
+  echo "WARNING: Quick mode — skipping tests. Use only for emergencies!"
 fi
 
 # ---- Temp files (cleaned up on exit) ----
 TMPFILE=$(mktemp /tmp/pathfinder-frontend-pre-push-XXXXXX.log)
 SEC_TMPFILE=$(mktemp /tmp/pathfinder-frontend-security-XXXXXX.json)
-CR_TMPFILE=$(mktemp /tmp/pathfinder-frontend-coderabbit-XXXXXX.log)
-trap 'rm -f "$TMPFILE" "$SEC_TMPFILE" "$CR_TMPFILE"' EXIT
+LINT_TMPFILE=$(mktemp /tmp/pathfinder-frontend-lint-XXXXXX.log)
+TSC_TMPFILE=$(mktemp /tmp/pathfinder-frontend-tsc-XXXXXX.log)
+trap 'rm -f "$TMPFILE" "$SEC_TMPFILE" "$LINT_TMPFILE" "$TSC_TMPFILE"' EXIT
 
 # ---- Colors for output ----
 RED='\033[0;31m'
@@ -69,12 +67,6 @@ print_header() {
   echo -e "${BLUE}  $(date '+%Y-%m-%d %H:%M:%S')${NC}"
   echo -e "${BLUE}============================================${NC}"
   echo ""
-}
-
-print_step() {
-  local step_num=$1
-  local step_name=$2
-  echo -e "${BOLD}[${step_num}] ${step_name}...${NC}"
 }
 
 record_result() {
@@ -160,16 +152,59 @@ print_header
 HAS_FAILURES=0
 
 # --------------------------------------------------------------------------
-# Check 1: Frontend Lint
+# Check 1+2: Lint + Type Check (PARALLEL — saves ~20s)
 # --------------------------------------------------------------------------
-print_step "1/6" "Frontend ESLint"
-run_check "Frontend Lint" npm run lint || HAS_FAILURES=1
+echo -e "${BOLD}[1/4] Frontend ESLint + TypeScript Type Check (parallel)...${NC}"
+PARALLEL_START=$(date +%s)
 
-# --------------------------------------------------------------------------
-# Check 2: Frontend TypeScript Type Check
-# --------------------------------------------------------------------------
-print_step "2/6" "Frontend TypeScript Type Check"
-run_check "Frontend Type Check" npm run type-check || HAS_FAILURES=1
+LINT_EXIT=0
+TSC_EXIT=0
+
+npm run lint > "$LINT_TMPFILE" 2>&1 &
+LINT_PID=$!
+
+npm run type-check > "$TSC_TMPFILE" 2>&1 &
+TSC_PID=$!
+
+wait $LINT_PID || LINT_EXIT=$?
+wait $TSC_PID || TSC_EXIT=$?
+
+PARALLEL_END=$(date +%s)
+PARALLEL_DURATION=$((PARALLEL_END - PARALLEL_START))
+
+# Record lint result
+TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+if [ "$LINT_EXIT" -eq 0 ]; then
+  PASSED_CHECKS=$((PASSED_CHECKS + 1))
+  RESULTS+=("${GREEN}PASS${NC}  Frontend Lint (${PARALLEL_DURATION}s)")
+  echo -e "  Lint:       ${GREEN}PASS${NC}"
+else
+  FAILED_CHECKS=$((FAILED_CHECKS + 1))
+  RESULTS+=("${RED}FAIL${NC}  Frontend Lint (${PARALLEL_DURATION}s)")
+  echo -e "  Lint:       ${RED}FAIL${NC}"
+  echo -e "  ${YELLOW}Output:${NC}"
+  tail -20 "$LINT_TMPFILE" | sed 's/^/    /'
+  echo ""
+  HAS_FAILURES=1
+fi
+
+# Record type-check result
+TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+if [ "$TSC_EXIT" -eq 0 ]; then
+  PASSED_CHECKS=$((PASSED_CHECKS + 1))
+  RESULTS+=("${GREEN}PASS${NC}  Frontend Type Check (${PARALLEL_DURATION}s)")
+  echo -e "  Type Check: ${GREEN}PASS${NC}"
+else
+  FAILED_CHECKS=$((FAILED_CHECKS + 1))
+  RESULTS+=("${RED}FAIL${NC}  Frontend Type Check (${PARALLEL_DURATION}s)")
+  echo -e "  Type Check: ${RED}FAIL${NC}"
+  echo -e "  ${YELLOW}Output:${NC}"
+  tail -20 "$TSC_TMPFILE" | sed 's/^/    /'
+  echo ""
+  HAS_FAILURES=1
+fi
+
+echo -e "  Combined:   ${PARALLEL_DURATION}s"
 
 # --------------------------------------------------------------------------
 # Check 3: Frontend Tests
@@ -178,7 +213,7 @@ if [ "$QUICK_MODE" = true ]; then
   echo -e "  ${YELLOW}SKIP${NC} — Quick mode, tests skipped"
   RESULTS+=("${YELLOW}SKIP${NC}  Frontend Tests — quick mode")
 elif node -e "const p=require('./package.json'); if(!p.scripts||!p.scripts.test){process.exit(1)}" 2>/dev/null; then
-  print_step "3/6" "Frontend Tests"
+  echo -e "${BOLD}[2/4] Frontend Tests...${NC}"
   run_check "Frontend Tests" npm test || HAS_FAILURES=1
 else
   echo -e "  ${YELLOW}SKIP${NC} — No test script in package.json (add 'test' script when ready)"
@@ -188,13 +223,13 @@ fi
 # --------------------------------------------------------------------------
 # Check 4: Frontend Build
 # --------------------------------------------------------------------------
-print_step "4/6" "Frontend Build"
+echo -e "${BOLD}[3/4] Frontend Build...${NC}"
 run_check "Frontend Build" npm run build || HAS_FAILURES=1
 
 # --------------------------------------------------------------------------
 # Check 5: Security Audit
 # --------------------------------------------------------------------------
-print_step "5/6" "Security Audit (npm audit)"
+echo -e "${BOLD}[4/4] Security Audit (npm audit)...${NC}"
 SEC_START=$(date +%s)
 SEC_EXIT=0
 npm audit --json > $SEC_TMPFILE 2>&1 || SEC_EXIT=$?
@@ -207,7 +242,6 @@ if [ "$SEC_EXIT" -eq 0 ]; then
   RESULTS+=("${GREEN}PASS${NC}  Security Audit (${SEC_DURATION}s)")
   echo -e "  ${GREEN}PASS${NC} (${SEC_DURATION}s)"
 else
-  # Parse JSON output for accurate critical vulnerability count
   CRITICAL_COUNT=$(node -e "try{const d=JSON.parse(require('fs').readFileSync('$SEC_TMPFILE','utf8'));console.log((d.metadata&&d.metadata.vulnerabilities&&d.metadata.vulnerabilities.critical)||0)}catch(e){console.log(0)}" 2>/dev/null || echo "0")
   TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
   if [ "$CRITICAL_COUNT" -gt 0 ]; then
@@ -221,45 +255,6 @@ else
     RESULTS+=("${YELLOW}WARN${NC}  Security Audit — non-critical issues (advisory) (${SEC_DURATION}s)")
     echo -e "  ${YELLOW}WARN${NC} — non-critical issues (advisory) (${SEC_DURATION}s)"
   fi
-fi
-# --------------------------------------------------------------------------
-# Check 6: CodeRabbit CLI Review (local, replaces GitHub CodeRabbit)
-# --------------------------------------------------------------------------
-if [ "$QUICK_MODE" = true ]; then
-  echo -e "  ${YELLOW}SKIP${NC} — Quick mode, CodeRabbit skipped"
-  RESULTS+=("${YELLOW}SKIP${NC}  CodeRabbit Review — quick mode")
-elif ! command -v coderabbit &> /dev/null; then
-  echo -e "  ${YELLOW}SKIP${NC} — CodeRabbit CLI not installed. Run: curl -fsSL https://cli.coderabbit.ai/install.sh | sh"
-  RESULTS+=("${YELLOW}SKIP${NC}  CodeRabbit Review — CLI not installed")
-else
-  print_step "6/6" "CodeRabbit CLI Review"
-
-  CR_START=$(date +%s)
-  CR_EXIT=0
-
-  coderabbit review --plain --base main > $CR_TMPFILE 2>&1 || CR_EXIT=$?
-
-  CR_END=$(date +%s)
-  CR_DURATION=$((CR_END - CR_START))
-
-  if [ "$CR_EXIT" -ne 0 ]; then
-    echo -e "  ${YELLOW}WARN${NC} — CodeRabbit CLI failed (exit $CR_EXIT). Run 'coderabbit auth login' if auth expired."
-    RESULTS+=("${YELLOW}WARN${NC}  CodeRabbit Review — CLI error (${CR_DURATION}s)")
-  else
-    # Count critical findings from CodeRabbit plain text output
-    # CodeRabbit --plain outputs "Type: potential_issue", "Type: bug", "Type: security"
-    CRITICAL_COUNT=$(grep -icE '(Type:\s*(potential_issue|bug|security))' $CR_TMPFILE 2>/dev/null || true)
-
-    if [ "$CRITICAL_COUNT" -gt 0 ]; then
-      RESULTS+=("${YELLOW}WARN${NC}  CodeRabbit Review — $CRITICAL_COUNT issue(s) found (${CR_DURATION}s)")
-      echo -e "  ${YELLOW}WARN${NC} — $CRITICAL_COUNT issue(s) found (advisory) (${CR_DURATION}s)"
-      echo -e "  ${YELLOW}Review manually: coderabbit review --plain --base main${NC}"
-    else
-      RESULTS+=("${GREEN}PASS${NC}  CodeRabbit Review — clean (${CR_DURATION}s)")
-      echo -e "  ${GREEN}PASS${NC} — clean (${CR_DURATION}s)"
-    fi
-  fi
-
 fi
 
 # --------------------------------------------------------------------------
